@@ -13,9 +13,26 @@ mkdir -p model_params
 
 # Download Protpadelle model params
 echo "Downloading Protpadelle model parameters..."
-aria2c -x16 -s16 -o protpardelle-1c.tar.gz "https://zenodo.org/records/16817230/files/protpardelle-1c.tar.gz?download=1"
-tar -xzvf protpardelle-1c.tar.gz --strip-components=1 # there will be a model_params/ directory
-rm protpardelle-1c.tar.gz
+zenodo_url="https://zenodo.org/records/16817230/files/protpardelle-1c.tar.gz?download=1"
+out_tar="protpardelle-1c.tar.gz"
+
+if ! aria2c \
+    --max-connection-per-server=1 \
+    --split=1 \
+    --min-split-size=1G \
+    --header='User-Agent: Mozilla/5.0' \
+    --header='Referer: https://zenodo.org/records/16817230' \
+    --auto-file-renaming=false \
+    -o "$out_tar" "$zenodo_url"; then
+    echo "aria2 download failed, retrying with wget..."
+    if ! wget -O "$out_tar" --referer='https://zenodo.org/records/16817230' "$zenodo_url"; then
+        echo "wget failed, retrying with curl..."
+        curl -fL -A 'Mozilla/5.0' -e 'https://zenodo.org/records/16817230' -o "$out_tar" "$zenodo_url"
+    fi
+fi
+
+tar -xzvf "$out_tar" --strip-components=1 # there will be a model_params/ directory
+rm "$out_tar"
 echo "Protpadelle model parameters downloaded."
 
 # Download ESMFold model
