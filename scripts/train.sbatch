@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=protpardelle_training
+#SBATCH --job-name=protpardelle_training_atom_permutation
 #SBATCH --output=train-%x.%j.out
 #SBATCH --error=train-%x.%j.err
 #SBATCH --partition=your-partition-name

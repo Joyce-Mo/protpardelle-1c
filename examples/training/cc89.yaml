@@ -1,4 +1,4 @@
-# cc58 but allatom
+# cc58 but allatom, originally for ai-cath data. Joyce updated for filtered cath-20 dataset. 
 train:
   seed: null
   ckpt_path: null
@@ -28,7 +28,7 @@ train:
     recenter_coords: True
 
 data:
-  pdb_paths: ["/your/path/to/augmented_ingraham_cath_bugfree"]
+  pdb_paths: ["/wynton/home/rotation/jqmo/rotation3/datasets/cath20-filtered-foldseek"]
   mixing_ratios: [1.0]
   fixed_size: 512
   n_aatype_tokens: 21

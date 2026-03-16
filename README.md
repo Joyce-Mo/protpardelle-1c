@@ -38,6 +38,7 @@ The original Protpardelle is detailed in our paper [An all-atom protein generati
 - [Training](#training)
   - [Datasets](#datasets)
 - [Likelihood](#likelihood)
+- [Representation Extraction](#representation-extraction)
 - [Citation](#citation)
 
 # Installation
@@ -322,6 +323,51 @@ python3 -m protpardelle.likelihood --model-name cc91 --epoch 383 --pdb-path exam
 ```
 
 Previously, all-atom model likelihoods were computed on backbone atoms only. Here we compute all-atom model likelihoods for the all-atom models and backbone-only model likelihoods for the backbone-only models.
+
+# Representation Extraction
+
+The `representation_extraction/` directory contains tools for extracting intermediate neural network representations from different Protpardelle modules across the denoising schedule. It supports multiple stochastic samplers and can save both pooled numpy arrays and full-resolution torch tensors. This is useful for mechanistic analysis, representation comparison across models, probing, and visualizing how internal features evolve during diffusion.
+
+The script uses PyTorch forward hooks to non-invasively capture hidden states from any combination of internal modules (transformer layers, convolutional blocks, noise embeddings, coordinate inputs/outputs) at every denoising step. A manual denoising loop supports four sampler strategies: deterministic Euler ODE, Karras stochastic, annealed Langevin dynamics (Song & Ermon 2019), and predictor-corrector.
+
+```bash
+# Extract transformer output using Euler ODE sampler, save full torch tensors
+python representation_extraction/extract_representations.py \
+    --config-path model_params/configs/cc58.yaml \
+    --checkpoint-path model_params/weights/cc58_epoch416.pth \
+    --output-dir results/representations \
+    --save-tensors \
+    --num-samples 8 --length 128 --num-steps 100 --device cuda
+
+# Multi-module extraction with annealed Langevin dynamics
+python representation_extraction/extract_representations.py \
+    --config-path model_params/configs/cc58.yaml \
+    --checkpoint-path model_params/weights/cc58_epoch416.pth \
+    --output-dir results/representations_langevin \
+    --hook-targets transformer_output,patch_embedding,noise_conditioning \
+    --sampler langevin --langevin-corrector-steps 5 --langevin-snr 0.16 \
+    --save-tensors \
+    --num-samples 8 --length 128 --num-steps 100 --device cuda
+
+# Predictor-corrector sampler
+python representation_extraction/extract_representations.py \
+    --config-path model_params/configs/cc58.yaml \
+    --checkpoint-path model_params/weights/cc58_epoch416.pth \
+    --output-dir results/representations_pc \
+    --sampler predictor_corrector --langevin-corrector-steps 3 --langevin-snr 0.1 \
+    --save-tensors \
+    --num-samples 8 --length 128 --num-steps 100 --device cuda
+
+# Per-layer attention analysis at selected transformer depths
+python representation_extraction/extract_representations.py \
+    --config-path model_params/configs/cc58.yaml \
+    --checkpoint-path model_params/weights/cc58_epoch416.pth \
+    --output-dir results/representations_layers \
+    --hook-targets per_layer_attn --layers 0,5,11 \
+    --num-steps 100 --device cuda
+```
+
+Available hook targets: `transformer_output`, `per_layer_attn`, `per_layer_ff`, `patch_embedding`, `from_patch`, `down_conv`, `up_conv`, `noise_conditioning`, `coord_denoiser_input`, `coord_denoiser_output`. Sampler choices: `euler`, `stochastic`, `langevin`, `predictor_corrector`, `default`. Outputs include pooled `.npz` arrays, full `.pt` tensors (with `--save-tensors`), a CSV index, and optional UMAP visualizations. See [`representation_extraction/README.md`](representation_extraction/README.md) for full documentation.
 
 # Citation
 
