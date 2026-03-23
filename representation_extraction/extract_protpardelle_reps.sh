@@ -25,7 +25,7 @@ else
 fi
 
 # ---------- paths (edit these) ----------
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="${SGE_O_WORKDIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 # Directory of CATH-20 PDB files
 PDB_DIR="/wynton/home/rotation/jqmo/rotation3/datasets/cath20-filtered-foldseek"
