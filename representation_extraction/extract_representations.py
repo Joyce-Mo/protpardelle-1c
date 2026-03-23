@@ -784,6 +784,9 @@ def parse_args() -> argparse.Namespace:
                          "extracted by noising each structure at each sigma level and running "
                          "the denoiser, producing per-residue features aligned to the input. "
                          "Overrides --num-samples and --length.")
+    p.add_argument("--batch-size", type=int, default=0,
+                    help="Process PDBs in batches of this size to limit memory usage. "
+                         "0 means process all at once (original behavior).")
     p.add_argument("--num-samples", type=int, default=8)
     p.add_argument("--length", type=int, default=128)
     p.add_argument("--num-steps", type=int, default=100)
@@ -986,6 +989,184 @@ def main() -> None:
             raise FileNotFoundError(f"No .pdb files found in {args.pdb_dir}")
         print(f"PDB mode: encoding {len(pdb_paths)} structures from {args.pdb_dir}")
 
+    # -------------------------------------------------------------------
+    # Batched PDB mode: process in chunks to limit memory
+    # -------------------------------------------------------------------
+    if pdb_mode and args.batch_size > 0:
+        batch_size = args.batch_size
+        num_batches = (len(pdb_paths) + batch_size - 1) // batch_size
+        pdb_out_dir = args.output_dir / "per_structure"
+        pdb_out_dir.mkdir(parents=True, exist_ok=True)
+
+        all_pdb_names: list[str] = []
+        # Accumulate per-module pooled arrays on disk as npz shards
+        shard_dir = args.output_dir / "_shards"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        shard_paths: list[Path] = []
+        num_steps_effective = None
+
+        print(f"Batched PDB mode: {len(pdb_paths)} structures in {num_batches} batches of {batch_size}")
+
+        for batch_i in range(num_batches):
+            batch_start = batch_i * batch_size
+            batch_end = min(batch_start + batch_size, len(pdb_paths))
+            batch_paths = pdb_paths[batch_start:batch_end]
+            print(f"\n--- Batch {batch_i + 1}/{num_batches} ({len(batch_paths)} structures) ---")
+
+            # Clear hook records
+            hook_records_pooled.clear()
+            hook_records_raw.clear() if save_tensors else None
+
+            try:
+                with torch.no_grad():
+                    aux = run_pdb_extraction(
+                        model=model,
+                        pdb_paths=batch_paths,
+                        num_steps=args.num_steps,
+                        step_scale=args.step_scale,
+                        device=torch.device(args.device) if args.device else model.device,
+                    )
+            except Exception:
+                for h in hook_handles:
+                    h.remove()
+                raise
+
+            if num_steps_effective is None:
+                num_steps_effective = len(aux["xt_traj"])
+
+            batch_pdb_names = aux["pdb_names"]
+            all_pdb_names.extend(batch_pdb_names)
+            num_pdbs_batch = len(batch_pdb_names)
+
+            # Save per-structure tensors to disk
+            for mod_name in sorted(hook_records_raw.keys() if save_tensors else hook_records_pooled.keys()):
+                raw_list = hook_records_raw[mod_name] if save_tensors else hook_records_pooled[mod_name]
+                for pdb_i, pdb_name in enumerate(batch_pdb_names):
+                    struct_dir = pdb_out_dir / pdb_name / mod_name
+                    struct_dir.mkdir(parents=True, exist_ok=True)
+                    for step_j in range(num_steps_effective):
+                        call_idx = step_j * num_pdbs_batch + pdb_i
+                        if call_idx < len(raw_list):
+                            torch.save(raw_list[call_idx], struct_dir / f"step_{step_j:04d}.pt")
+
+            # Save metadata
+            for pdb_i, (pdb_name, feats) in enumerate(zip(batch_pdb_names, aux["feats_list"])):
+                meta_path = pdb_out_dir / pdb_name / "metadata.pt"
+                torch.save({
+                    "pdb_name": pdb_name,
+                    "aatype": feats["aatype"],
+                    "residue_index": feats["residue_index"],
+                    "chain_index": feats["chain_index"],
+                    "atom_positions": feats["atom_positions"],
+                    "num_residues": feats["aatype"].shape[0],
+                }, meta_path)
+
+            # Save pooled shard for combined npz later
+            shard_data = {}
+            for mod_name in sorted(hook_records_pooled.keys()):
+                reps = hook_records_pooled[mod_name]
+                stacked = np.stack([r.numpy() for r in reps], axis=0).squeeze(1)
+                shard_data[mod_name] = stacked.astype(np.float32)
+            shard_path = shard_dir / f"shard_{batch_i:06d}.npz"
+            np.savez_compressed(shard_path, **shard_data,
+                                pdb_names=np.array(batch_pdb_names, dtype=object))
+            shard_paths.append(shard_path)
+
+            # Free memory
+            del aux
+            hook_records_pooled.clear()
+            if save_tensors:
+                hook_records_raw.clear()
+            import gc; gc.collect()
+
+        # Remove hooks
+        for h in hook_handles:
+            h.remove()
+
+        # Combine shards into final npz
+        print(f"\nCombining {len(shard_paths)} shards into final representations...")
+        module_features: dict[str, list[np.ndarray]] = defaultdict(list)
+        for sp in shard_paths:
+            shard = np.load(sp, allow_pickle=True)
+            for key in shard.files:
+                if key != "pdb_names":
+                    module_features[key].append(shard[key])
+            shard.close()
+
+        all_features, all_step, all_sample, all_module, all_dim = [], [], [], [], []
+        module_names_ordered = sorted(module_features.keys())
+        num_pdbs_total = len(all_pdb_names)
+
+        for mod_name in module_names_ordered:
+            flat = np.concatenate(module_features[mod_name], axis=0).astype(np.float32)
+            dim = flat.shape[-1]
+            steps = np.repeat(np.arange(num_steps_effective), num_pdbs_total).astype(np.int32)[:flat.shape[0]]
+            samples = np.tile(np.arange(num_pdbs_total), num_steps_effective).astype(np.int32)[:flat.shape[0]]
+
+            mod_npz = args.output_dir / f"representations_{mod_name}.npz"
+            np.savez_compressed(mod_npz, features=flat, step_idx=steps, sample_idx=samples,
+                                pdb_names=np.array(all_pdb_names, dtype=object))
+            print(f"  {mod_name}: {flat.shape[0]} vectors x {dim}D -> {mod_npz}")
+
+            all_features.append(flat)
+            all_step.append(steps)
+            all_sample.append(samples)
+            all_module.append(np.full(flat.shape[0], mod_name, dtype=object))
+            all_dim.append(dim)
+
+        # Zero-pad to max dim
+        max_dim = max(all_dim)
+        padded_features = []
+        for feat, dim in zip(all_features, all_dim):
+            if dim < max_dim:
+                padded_features.append(np.pad(feat, ((0, 0), (0, max_dim - dim)), mode="constant"))
+            else:
+                padded_features.append(feat)
+
+        features = np.concatenate(padded_features, axis=0).astype(np.float32)
+        step_idx = np.concatenate(all_step, axis=0)
+        sample_idx = np.concatenate(all_sample, axis=0)
+        module_labels = np.concatenate(all_module, axis=0)
+
+        unique_modules = sorted(set(module_labels))
+        mod_to_int = {m: i for i, m in enumerate(unique_modules)}
+        module_idx = np.array([mod_to_int[m] for m in module_labels], dtype=np.int32)
+        native_dims = np.array([all_dim[module_names_ordered.index(m)] for m in unique_modules], dtype=np.int32)
+
+        npz_path = args.output_dir / "representations.npz"
+        np.savez_compressed(npz_path, features=features, step_idx=step_idx,
+                            sample_idx=sample_idx, module_idx=module_idx,
+                            module_names=np.array(unique_modules, dtype=object),
+                            module_native_dims=native_dims,
+                            num_steps=np.array([num_steps_effective], dtype=np.int32),
+                            num_samples=np.array([num_pdbs_total], dtype=np.int32),
+                            sampler=np.array([args.sampler], dtype=object),
+                            pdb_names=np.array(all_pdb_names, dtype=object))
+
+        csv_path = args.output_dir / "representations_index.csv"
+        pd.DataFrame({
+            "module": module_labels,
+            "step_idx": step_idx,
+            "sample_idx": sample_idx,
+        }).to_csv(csv_path, index=False)
+
+        dim_summary = ", ".join(f"{m}={d}D" for m, d in zip(unique_modules, native_dims))
+        print(f"Combined: {features.shape[0]} vectors, padded to {max_dim}D (native: {dim_summary})")
+        print(f"  -> {npz_path}")
+        print(f"  -> {csv_path}")
+        print(f"Per-structure representations -> {pdb_out_dir}/")
+
+        # Clean up shards
+        import shutil
+        shutil.rmtree(shard_dir, ignore_errors=True)
+
+        if not args.skip_umap:
+            print("Skipping UMAP for batched mode (too many points). Use per-module npz files for downstream analysis.")
+        return
+
+    # -------------------------------------------------------------------
+    # Non-batched mode (original behavior)
+    # -------------------------------------------------------------------
     try:
         with torch.no_grad():
             if pdb_mode:

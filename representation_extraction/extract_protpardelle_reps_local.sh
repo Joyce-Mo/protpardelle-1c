@@ -1,40 +1,36 @@
 #!/bin/bash
-#$ -S /bin/bash
-#$ -cwd
-#$ -j y
-#$ -l mem_free=4G
-#$ -l scratch=2G
-#$ -l h_rt=24:00:00
-#$ -r y
-#$ -m bea
-#$ -M joyce.mo@ucsf.edu
-#$ -l mem_free=16G
+set -euo pipefail
 
 date
 hostname
 
-# ---------- modules ----------
-# No GPU modules needed for CPU-only run
-
 # ---------- environment ----------
-if [ -z "$ENV_DIR" ]; then
+if [ -z "${CONDA_DEFAULT_ENV:-}" ] || [ "$CONDA_DEFAULT_ENV" != "protpardelle" ]; then
     conda activate protpardelle
-else
-    source "$ENV_DIR"/protpardelle/bin/activate
 fi
 
 # ---------- paths (edit these) ----------
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Directory of CATH-20 PDB files
-PDB_DIR="/wynton/home/rotation/jqmo/rotation3/datasets/cath20-filtered-foldseek"
+PDB_DIR="${PDB_DIR:-/Users/joycemo/Documents/PhD/Rotation3/dataset/cath20/cath20-filtered-foldseek}"
 
 # Where to save output representations
-OUTPUT_BASE="/wynton/home/rotation/jqmo/rotation3/datasets/cath20_partprodelle_initial_reps"
+OUTPUT_BASE="${OUTPUT_BASE:-/Users/joycemo/Documents/PhD/Rotation3/dataset/cath20/cath20_protpardelle_reps}"
 
 # Model config and checkpoint
 CONFIG="${REPO_ROOT}/model_params/configs/cc89.yaml"
 CHECKPOINT="${REPO_ROOT}/model_params/weights/cc89_epoch415.pth"
+
+# ---------- device ----------
+if python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    DEVICE=cuda
+elif python -c "import torch; assert torch.backends.mps.is_available()" 2>/dev/null; then
+    DEVICE=mps
+else
+    DEVICE=cpu
+fi
+echo "Using device: ${DEVICE}"
 
 # ---------- run ----------
 echo "========== Extracting Protpardelle representations =========="
@@ -46,7 +42,4 @@ python "${REPO_ROOT}/representation_extraction/extract_representations.py" \
     --hook-targets transformer_output,patch_embedding,noise_conditioning \
     --save-tensors \
     --num-steps 100 \
-    --device cpu
-
-# ---------- end-of-job ----------
-[[ -n "$JOB_ID" ]] && qstat -j "$JOB_ID"
+    --device "${DEVICE}"
