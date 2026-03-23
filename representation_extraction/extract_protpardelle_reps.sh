@@ -2,19 +2,20 @@
 #$ -S /bin/bash
 #$ -cwd
 #$ -j y
-#$ -l mem_free=4G
+#$ -l mem_free=16G
 #$ -l scratch=2G
 #$ -l h_rt=24:00:00
 #$ -r y
 #$ -m bea
 #$ -M joyce.mo@ucsf.edu
-#$ -l mem_free=16G
 
 date
 hostname
 
 # ---------- modules ----------
-# No GPU modules needed for CPU-only run
+if command -v module >/dev/null 2>&1; then
+    module load CBI miniforge3
+fi
 
 # ---------- environment ----------
 if [ -z "$ENV_DIR" ]; then

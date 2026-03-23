@@ -4,7 +4,7 @@
 This script hooks into various internal modules of Protpardelle during sampling and
 captures intermediate hidden states at every denoising step. It supports multiple
 denoising strategies (ODE, stochastic Karras, annealed Langevin dynamics, predictor-
-corrector) via a manual sampling loop, and can save both pooled numpy arrays and
+corrector) via a manual samplinupg loop, and can save both pooled numpy arrays and
 full-resolution torch tensors.
 
 Hookable modules (selected via --hook-targets):
